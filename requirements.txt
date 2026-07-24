@@ -1,0 +1,17 @@
+# 核心依赖，本地(CPU开发)和AutoDL(GPU训练)通用
+# AutoDL 上 torch 建议用镜像自带的 CUDA 版本，不要用这里的默认索引重新装
+
+torch>=2.2
+transformers>=4.44
+accelerate>=0.33
+open_clip_torch>=2.24
+datasets>=2.20
+pillow
+numpy
+tqdm
+tensorboard
+sentencepiece
+protobuf
+
+# 训练/实验管理（可选，占位先加上）
+peft>=0.11
