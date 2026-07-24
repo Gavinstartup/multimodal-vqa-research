@@ -3,17 +3,40 @@
 # torch 使用镜像自带的 CUDA 版本，不要被 requirements.txt 里的默认索引覆盖安装。
 set -euo pipefail
 
-# 国内网络访问 huggingface.co 较慢/不稳定，走镜像端点
+# 国内网络访问 huggingface.co 较慢/不稳定，CLIP 体积小仍走 HF 镜像端点
 export HF_ENDPOINT="https://hf-mirror.com"
 
 pip install -r requirements.txt
 
+# Qwen3-8B 体积大（bf16 ~16GB），国内网络下默认从魔搭（ModelScope）下载，比 HF 快很多；
+# 想强制走 HF 的话设 MODEL_SOURCE=hf 再跑本脚本。
+if [ "${MODEL_SOURCE:-modelscope}" = "modelscope" ]; then
+    pip install modelscope
+    python - <<'PY'
+from modelscope import snapshot_download
+
+qwen_path = snapshot_download("Qwen/Qwen3-8B")
+print(f"Qwen3-8B downloaded to: {qwen_path}")
+with open("models_paths.env", "w", encoding="utf-8") as f:
+    f.write(f'export TEXT_MODEL_PATH="{qwen_path}"\n')
+PY
+    echo "Qwen3-8B 已通过 ModelScope 下载。训练/推理时用本地路径而不是仓库名："
+    echo "  source models_paths.env"
+    echo '  python -m src.train.train_stage1 --text_model "$TEXT_MODEL_PATH" ...'
+else
+    python - <<'PY'
+from huggingface_hub import snapshot_download
+
+print("downloading Qwen/Qwen3-8B from HuggingFace ...")
+snapshot_download("Qwen/Qwen3-8B")
+PY
+fi
+
 python - <<'PY'
 from huggingface_hub import snapshot_download
 
-for repo_id in ("openai/clip-vit-large-patch14-336", "Qwen/Qwen3-8B"):
-    print(f"downloading {repo_id} ...")
-    snapshot_download(repo_id)
+print("downloading openai/clip-vit-large-patch14-336 ...")
+snapshot_download("openai/clip-vit-large-patch14-336")
 PY
 
 # Stage-1 对齐数据集（LLaVA-Pretrain, blip_laion_cc_sbu_558k）体积较大（图片 zip ~20GB），
