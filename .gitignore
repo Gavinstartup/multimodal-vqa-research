@@ -11,5 +11,5 @@ runs/
 outputs/
 checkpoints/
 wandb/
-data/
+data/*
 !data/.gitkeep

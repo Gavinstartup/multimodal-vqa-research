@@ -2,9 +2,8 @@
 # AutoDL 上 torch 建议用镜像自带的 CUDA 版本，不要用这里的默认索引重新装
 
 torch>=2.2
-transformers>=4.44
+transformers>=4.51  # Qwen3 支持从这个版本开始
 accelerate>=0.33
-open_clip_torch>=2.24
 datasets>=2.20
 pillow
 numpy
@@ -15,3 +14,6 @@ protobuf
 
 # 训练/实验管理（可选，占位先加上）
 peft>=0.11
+
+# 测试（仅本地/CI，不影响 AutoDL 训练运行）
+pytest>=7.0
