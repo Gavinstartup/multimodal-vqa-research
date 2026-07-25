@@ -38,7 +38,11 @@ class VQAForConditionalGeneration(VQAPreTrainedModel):
         self.language_model.set_input_embeddings(value)
 
     def get_image_features(self, pixel_values):
-        vision_dtype = self.vision_tower.embeddings.patch_embedding.weight.dtype
+        # Not self.vision_tower.embeddings.patch_embedding.weight.dtype: CLIPVisionModel's
+        # internal module tree (flat vs. wrapped in a .vision_model submodule) has changed
+        # across transformers versions, so pull dtype from any parameter instead of assuming
+        # a specific submodule path.
+        vision_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(dtype=vision_dtype)
         image_outputs = self.vision_tower(pixel_values, output_hidden_states=True)
         selected = image_outputs.hidden_states[self.config.vision_feature_layer]
