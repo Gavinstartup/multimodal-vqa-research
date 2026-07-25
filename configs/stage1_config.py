@@ -29,7 +29,9 @@ class TrainingSettings:
     GRADIENT_ACCUMULATION_STEPS = 16
     LOG_INTERVAL = 10
     VAL_SPLIT = 0.05
-    EARLY_STOPPING_PATIENCE = 5
+    # Must stay < EPOCHS or early stopping can mathematically never fire (it needs this
+    # many *consecutive* non-improving epochs, which can't happen if the run ends first).
+    EARLY_STOPPING_PATIENCE = 2
     LR_PATIENCE = 2
     LR_FACTOR = 0.5
     NUM_WORKERS = 4

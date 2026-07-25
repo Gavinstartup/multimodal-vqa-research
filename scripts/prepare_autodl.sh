@@ -3,6 +3,21 @@
 # torch 使用镜像自带的 CUDA 版本，不要被 requirements.txt 里的默认索引覆盖安装。
 set -euo pipefail
 
+# AutoDL 系统盘（/）通常只有 30GB 左右，Qwen3-8B(~17GB) + CLIP(~1.7GB) 加起来就快占满，
+# 必须全部落在数据盘上，不能用默认的 ~/.cache（否则会悄悄写满系统盘）。DOWNLOAD_STAGE1_DATA=1
+# 时还会临时下载 images.zip(~20GB，只解压 NUM_SAMPLES 张后立刻删掉)，峰值在 ~44GB 左右
+# （50GB 数据盘够用，但没什么余量）。DATA_DISK 默认指向 AutoDL 的数据盘路径，其他平台按需覆盖。
+# 前提：整个项目目录本身也要 clone/上传到数据盘下（例如 /root/autodl-tmp/VQA），这样
+# configs/stage1_config.py 里默认的相对路径 data/ 才会落在数据盘，而不是系统盘。
+DATA_DISK="${DATA_DISK:-/root/autodl-tmp}"
+mkdir -p "$DATA_DISK"
+export HF_HOME="$DATA_DISK/hf_cache"
+export MODELSCOPE_CACHE="$DATA_DISK/modelscope_cache"
+mkdir -p data
+
+echo "缓存目录: $DATA_DISK  当前工作目录: $(pwd)"
+df -h "$DATA_DISK"
+
 # 国内网络访问 huggingface.co 较慢/不稳定，CLIP 体积小仍走 HF 镜像端点
 export HF_ENDPOINT="https://hf-mirror.com"
 
@@ -39,8 +54,14 @@ print("downloading openai/clip-vit-large-patch14-336 ...")
 snapshot_download("openai/clip-vit-large-patch14-336")
 PY
 
-# Stage-1 对齐数据集（LLaVA-Pretrain, blip_laion_cc_sbu_558k）体积较大（图片 zip ~20GB），
-# 默认不下载；需要时设置 DOWNLOAD_STAGE1_DATA=1 再跑本脚本。
+echo "模型下载完成后的磁盘占用："
+df -h "$DATA_DISK"
+
+# Stage-1 对齐数据集（LLaVA-Pretrain, blip_laion_cc_sbu_558k）默认不下载，需要时设置
+# DOWNLOAD_STAGE1_DATA=1 再跑本脚本。这个仓库只发布了完整 558K 版本，没有现成的小子集，
+# 所以还是要下载完整的 annotations json + images.zip（zip 本身无法只下载一部分），下载后
+# 从 558K 里随机采样 NUM_SAMPLES 条（默认 15 万），只解压这些样本用到的图片（不是全部
+# 558K 张），大幅降低解压后的磁盘占用；解压用完的 zip 立刻删掉。
 if [ "${DOWNLOAD_STAGE1_DATA:-0}" = "1" ]; then
     python - <<'PY'
 from huggingface_hub import hf_hub_download
@@ -49,7 +70,34 @@ for filename in ("blip_laion_cc_sbu_558k.json", "images.zip"):
     print(f"downloading LLaVA-Pretrain/{filename} ...")
     hf_hub_download(repo_id="liuhaotian/LLaVA-Pretrain", filename=filename, repo_type="dataset", local_dir="data")
 PY
-    unzip -q -o data/images.zip -d data/images
+
+    NUM_SAMPLES="${NUM_SAMPLES:-150000}"
+    python - <<PY
+import json
+import random
+import zipfile
+
+random.seed(42)
+with open("data/blip_laion_cc_sbu_558k.json", encoding="utf-8") as f:
+    full = json.load(f)
+
+n = min($NUM_SAMPLES, len(full))
+subset = random.sample(full, n)
+with open("data/blip_laion_cc_sbu_558k.json", "w", encoding="utf-8") as f:
+    json.dump(subset, f, ensure_ascii=False)
+
+image_names = {item["image"] for item in subset}
+print(f"sampled {len(subset)} / {len(full)} annotations, extracting {len(image_names)} images ...")
+with zipfile.ZipFile("data/images.zip") as zf:
+    for name in image_names:
+        zf.extract(name, "data/images")
+print("subset extraction done")
+PY
+
+    rm -f data/images.zip  # 只留子集用到的图片，zip 本体（含另外 ~76% 用不到的图片）删掉省空间
+    echo "数据集就绪（随机采样 $NUM_SAMPLES 条），annotations: data/blip_laion_cc_sbu_558k.json  images: data/images"
 fi
 
+echo "最终磁盘占用："
+df -h "$DATA_DISK"
 echo "AutoDL environment ready."
