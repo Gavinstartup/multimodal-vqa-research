@@ -234,13 +234,27 @@ def main():
                 logger.info("Early stopping triggered after %d epochs", epoch + 1)
                 break
 
+    # Whatever's in memory right now is just whichever epoch training happened to stop
+    # on — early stopping's *timing* can be a bit off (noisy val_loss, coarse per-epoch
+    # checks), so "last epoch" is not necessarily "best epoch". Reload the best-val-loss
+    # checkpoint before writing out final_model/, so the deployed artifact is always the
+    # best one seen, regardless of exactly when the loop stopped.
+    best_ckpt_path = os.path.join(args.output_dir, "projector_best.pt")
+    if os.path.isfile(best_ckpt_path):
+        best_ckpt = torch.load(best_ckpt_path, map_location=device)
+        model.multi_modal_projector.load_state_dict(best_ckpt["projector_state_dict"])
+        logger.info(
+            "Loaded best checkpoint (epoch %s, val_loss=%.4f) for final_model/",
+            best_ckpt.get("epoch"), best_ckpt.get("val_loss", float("nan")),
+        )
+
     save_projector_checkpoint(model, os.path.join(args.output_dir, "projector_final.pt"))
 
     final_model_dir = os.path.join(args.output_dir, "final_model")
     model.config.save_pretrained(final_model_dir)
     tokenizer.save_pretrained(final_model_dir)
     torch.save(model.multi_modal_projector.state_dict(), os.path.join(final_model_dir, "projector.pt"))
-    logger.info("Training complete. Config + tokenizer + projector saved to %s", final_model_dir)
+    logger.info("Training complete. Config + tokenizer + projector (best val_loss) saved to %s", final_model_dir)
 
 
 if __name__ == "__main__":
