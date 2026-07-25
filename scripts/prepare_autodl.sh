@@ -22,6 +22,15 @@ df -h "$DATA_DISK"
 # 国内网络访问 huggingface.co 较慢/不稳定，CLIP 体积小仍走 HF 镜像端点
 export HF_ENDPOINT="https://hf-mirror.com"
 
+# 这几个变量只在本次脚本进程里生效，训练/推理是在新开的 shell 里跑的，不 source 一下的话
+# CLIPImageProcessor.from_pretrained 等调用会直接去连真正的 huggingface.co、连不到本地缓存。
+# 写进 models_paths.env，后面新开 shell 跑训练/推理前先 `source models_paths.env` 即可。
+cat > models_paths.env <<ENVEOF
+export HF_HOME="$HF_HOME"
+export HF_ENDPOINT="$HF_ENDPOINT"
+export MODELSCOPE_CACHE="$MODELSCOPE_CACHE"
+ENVEOF
+
 pip install -r requirements.txt
 
 # Qwen3-8B 体积大（bf16 ~16GB），国内网络下默认从魔搭（ModelScope）下载，比 HF 快很多；
@@ -33,7 +42,7 @@ from modelscope import snapshot_download
 
 qwen_path = snapshot_download("Qwen/Qwen3-8B")
 print(f"Qwen3-8B downloaded to: {qwen_path}")
-with open("models_paths.env", "w", encoding="utf-8") as f:
+with open("models_paths.env", "a", encoding="utf-8") as f:
     f.write(f'export TEXT_MODEL_PATH="{qwen_path}"\n')
 PY
     echo "Qwen3-8B 已通过 ModelScope 下载。训练/推理时用本地路径而不是仓库名："
