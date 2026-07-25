@@ -23,6 +23,7 @@ from transformers import AutoTokenizer, CLIPImageProcessor
 from configs import stage1_config as cfg
 from src.data import VQADataset, build_collate_fn
 from src.model import VQAForConditionalGeneration
+from src.utils import resolve_device, resolve_dtype
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,8 +130,8 @@ def main():
     args = parse_args()
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = getattr(torch, args.dtype) if device.type == "cuda" else torch.float32
+    device = resolve_device()
+    dtype = resolve_dtype(device, args.dtype)
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "runs"))
 
     logger.info("Loading tokenizer and image processor...")

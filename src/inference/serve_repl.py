@@ -24,6 +24,7 @@ from transformers import AutoTokenizer, CLIPImageProcessor, TextIteratorStreamer
 
 from configs import stage1_config as cfg
 from src.model import VQAConfig, VQAForConditionalGeneration
+from src.utils import resolve_device, resolve_dtype
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -108,8 +109,8 @@ def answer(model, tokenizer, image_features, question, args, device):
 
 def main():
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = getattr(torch, args.dtype) if device.type == "cuda" else torch.float32
+    device = resolve_device()
+    dtype = resolve_dtype(device, args.dtype)
 
     model, tokenizer, image_processor = load_model(args, device, dtype)
     logger.info("Model loaded once, ready. Type 'image: <path>' to set/switch image, 'quit' to exit.")
