@@ -17,6 +17,7 @@ from transformers import AutoTokenizer, CLIPImageProcessor
 
 from configs import stage1_config as cfg
 from src.model import VQAConfig, VQAForConditionalGeneration
+from src.utils import resolve_device, resolve_dtype
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,8 +39,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = getattr(torch, args.dtype) if device.type == "cuda" else torch.float32
+    device = resolve_device()
+    dtype = resolve_dtype(device, args.dtype)
 
     logger.info("Loading config + tokenizer from %s ...", args.checkpoint)
     config = VQAConfig.from_pretrained(args.checkpoint)
