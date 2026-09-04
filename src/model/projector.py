@@ -17,6 +17,9 @@ class VQAMultiModalProjector(nn.Module):
         self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size, bias=True)
 
     def forward(self, image_features):
+        # Trained in fp32 (see train_stage1.py) while the vision tower feeding this
+        # runs in bf16 — cast up so the matmuls here don't inherit that lower precision.
+        image_features = image_features.to(self.linear_1.weight.dtype)
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
