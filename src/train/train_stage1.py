@@ -46,6 +46,18 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=cfg.TrainingSettings.MAX_LENGTH)
     parser.add_argument("--grad_accum_steps", type=int, default=cfg.TrainingSettings.GRADIENT_ACCUMULATION_STEPS)
     parser.add_argument("--log_interval", type=int, default=cfg.TrainingSettings.LOG_INTERVAL)
+    parser.add_argument(
+        "--save_every_steps", type=int, default=5000,
+        help="Save a rolling projector_latest.pt every N training steps within an epoch, "
+             "so a long run can resume progress if interrupted before the epoch finishes. "
+             "0 disables mid-epoch checkpointing.",
+    )
+    parser.add_argument(
+        "--resume_from", type=str, default=None,
+        help="Path to a projector_latest.pt/projector_best.pt to warm-start the projector "
+             "weights from after an interrupted run. Optimizer/scheduler state and epoch "
+             "position are not restored — this only avoids re-learning from a random init.",
+    )
     parser.add_argument("--val_split", type=float, default=cfg.TrainingSettings.VAL_SPLIT)
     parser.add_argument("--early_stopping", type=int, default=cfg.TrainingSettings.EARLY_STOPPING_PATIENCE)
     parser.add_argument("--lr_patience", type=int, default=cfg.TrainingSettings.LR_PATIENCE)
@@ -72,7 +84,10 @@ def set_seed(seed):
     random.seed(seed)
 
 
-def run_epoch(model, loader, device, optimizer, grad_accum_steps, epoch, epochs, log_interval, writer, train):
+def run_epoch(
+    model, loader, device, optimizer, grad_accum_steps, epoch, epochs, log_interval, writer, train,
+    save_every_steps=0, output_dir=None,
+):
     # Safe to put the whole tree (including the frozen vision_tower/language_model) in
     # train() mode: both checkpoints use dropout=0.0, so this has no numerical effect on
     # them, and train() is what lets gradient_checkpointing_enable() actually engage.
@@ -107,12 +122,23 @@ def run_epoch(model, loader, device, optimizer, grad_accum_steps, epoch, epochs,
                 running_loss += loss.item()
                 n_batches += 1
 
+                global_step = epoch * len(loader) + batch_idx
+
                 if train and (batch_idx + 1) % log_interval == 0:
                     avg = running_loss / log_interval
                     pbar.set_postfix(loss=avg)
-                    global_step = epoch * len(loader) + batch_idx
                     writer.add_scalar("Loss/train", avg, global_step)
                     running_loss = 0.0
+
+                # A full epoch on the real dataset can run for many hours — only saving
+                # at epoch end means a single interrupted run (SSH drop, host reclaim,
+                # etc.) loses everything. Cheap mid-epoch safety net, separate from the
+                # best/final checkpoints below (this one tracks recency, not val_loss).
+                if train and save_every_steps and (batch_idx + 1) % save_every_steps == 0:
+                    save_projector_checkpoint(
+                        model, os.path.join(output_dir, "projector_latest.pt"),
+                        extra={"epoch": epoch + 1, "step": batch_idx + 1},
+                    )
 
     avg_loss = total_loss / max(n_batches, 1)
     return avg_loss
@@ -162,6 +188,12 @@ def main():
     # The frozen vision_tower/language_model stay in bf16 for memory; the projector's
     # forward() casts their bf16 output back up to fp32 before computing with it.
     model.multi_modal_projector.to(torch.float32)
+
+    if args.resume_from:
+        resume_ckpt = torch.load(args.resume_from, map_location=device)
+        resume_state = resume_ckpt.get("projector_state_dict", resume_ckpt)
+        model.multi_modal_projector.load_state_dict(resume_state)
+        logger.info("Resumed projector weights from %s", args.resume_from)
 
     if args.gradient_checkpointing:
         # Backward still has to walk the entire frozen 36-layer LM to reach the
@@ -214,6 +246,7 @@ def main():
         run_epoch(
             model, train_loader, device, optimizer, args.grad_accum_steps,
             epoch, args.epochs, args.log_interval, writer, train=True,
+            save_every_steps=args.save_every_steps, output_dir=args.output_dir,
         )
         val_loss = run_epoch(
             model, val_loader, device, optimizer, args.grad_accum_steps,
