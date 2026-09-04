@@ -157,6 +157,11 @@ def main():
     model.config.text_config.vocab_size = len(tokenizer)
     model.freeze_for_stage1()
     model.to(device=device, dtype=dtype)
+    # The projector is the only trainable module — keep it (and its AdamW optimizer
+    # state) in fp32 so gradient updates aren't rounded away by bf16's 7-bit mantissa.
+    # The frozen vision_tower/language_model stay in bf16 for memory; the projector's
+    # forward() casts their bf16 output back up to fp32 before computing with it.
+    model.multi_modal_projector.to(torch.float32)
 
     if args.gradient_checkpointing:
         # Backward still has to walk the entire frozen 36-layer LM to reach the
@@ -188,11 +193,11 @@ def main():
     collate_fn = build_collate_fn(pad_token_id=tokenizer.pad_token_id)
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, collate_fn=collate_fn,
+        num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, collate_fn=collate_fn,
+        num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=True,
     )
 
     optimizer = torch.optim.AdamW(
