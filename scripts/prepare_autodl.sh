@@ -170,7 +170,11 @@ fi
 # 注意 Stage-2 的 COCO 图片和 Stage-1 的 LAION/CC/SBU 图片共用 data/images/。文件名不冲突
 # （Stage-1 的带 00453/ 这样的子目录前缀），但磁盘占用是叠加的。
 if [ "${DOWNLOAD_STAGE2_DATA:-0}" = "1" ]; then
-    if [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
+    # 下面会把 annotations 改名成 _full.json 留底，所以原名文件必然不存在，下载器每次重跑都会
+    # 认为要重新拉一遍这 229MB。有留底就直接跳过下载段。
+    if [ -f data/llava_instruct_150k_full.json ]; then
+        echo "annotations 已存在（data/llava_instruct_150k_full.json），跳过下载"
+    elif [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
         pip install modelscope  # 若 MODEL_SOURCE=hf 时没装过，这里兜底装一下；已装则秒过
         python - <<'PY'
 from modelscope import dataset_snapshot_download
