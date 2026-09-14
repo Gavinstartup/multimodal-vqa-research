@@ -23,9 +23,11 @@ LLaVA 风格多模态视觉问答系统重构版：CLIP ViT + MLP Projector + Qw
   # 环境准备时顺带下载指令数据（annotations 走魔搭 ~218MB，COCO train2017 图片走官方源 ~18GB）
   DOWNLOAD_STAGE2_DATA=1 bash scripts/prepare_autodl.sh
 
+  source models_paths.env          # 提供 TEXT_MODEL_PATH / VISION_MODEL_PATH 等本地路径
   python -m src.train.train_stage2 \
       --image_dir data/images --annotations data/llava_instruct_150k.json \
-      --stage1_checkpoint outputs/stage1_projector/final_model
+      --stage1_checkpoint outputs/stage1_projector/final_model \
+      --vision_model "$VISION_MODEL_PATH"
   ```
 
   产出的 `final_model/`（config + tokenizer + `projector.pt` + LoRA adapter）可以直接传给

@@ -48,7 +48,7 @@ with open("models_paths.env", "a", encoding="utf-8") as f:
 PY
     echo "Qwen3-8B 已通过 ModelScope 下载。训练/推理时用本地路径而不是仓库名："
     echo "  source models_paths.env"
-    echo '  python -m src.train.train_stage1 --text_model "$TEXT_MODEL_PATH" ...'
+    echo '  python -m src.train.train_stage1 --text_model "$TEXT_MODEL_PATH" --vision_model "$VISION_MODEL_PATH" ...'
 else
     python - <<'PY'
 from huggingface_hub import snapshot_download
@@ -58,14 +58,30 @@ snapshot_download("Qwen/Qwen3-8B")
 PY
 fi
 
-# 这个仓库没发布 safetensors，权重是 pytorch_model.bin(~1.7GB) 和 tf_model.h5(~1.7GB) 两份，
-# 后者 CLIPVisionModel 根本不会读，只下需要的那份。
-#
-# HF_HUB_DISABLE_XET=1 是重点：huggingface_hub 新版默认用 Xet 后端，它在内存里缓冲分块，下
-# 1.7GB 的权重时峰值会顶爆 AutoDL 无卡模式的 2GB cgroup 配额，被 OOM killer 干掉——表现为一
-# 句没头没尾的 "Killed"，配合 set -e 直接让整个脚本中止在这里。退回普通 HTTP 流式下载后内存
-# 占用和文件大小无关。并发也收到 1，进一步压低峰值。
-HF_HUB_DISABLE_XET=1 python - <<'PY'
+# CLIP ViT-L/14-336 的权重只有 pytorch_model.bin(~1.7GB) 和 tf_model.h5(~1.7GB) 两份，没发布
+# safetensors；后者 CLIPVisionModel 根本不会读，两条路径都排除掉，省一半流量。
+# 和 Qwen3-8B 一样默认走魔搭（AI-ModelScope/clip-vit-large-patch14-336 与 HF 上的
+# openai/clip-vit-large-patch14-336 同名同构，pytorch_model.bin 字节数一致），MODEL_SOURCE=hf
+# 切回 HF。两边都把最终路径写进 models_paths.env，训练/推理统一用 --vision_model 传。
+if [ "${MODEL_SOURCE:-modelscope}" = "modelscope" ]; then
+    python - <<'PY'
+from modelscope import snapshot_download
+
+print("downloading AI-ModelScope/clip-vit-large-patch14-336 ...")
+clip_path = snapshot_download(
+    "AI-ModelScope/clip-vit-large-patch14-336",
+    ignore_file_pattern=["tf_model.h5"],
+)
+print(f"CLIP downloaded to: {clip_path}")
+with open("models_paths.env", "a", encoding="utf-8") as f:
+    f.write(f'export VISION_MODEL_PATH="{clip_path}"\n')
+PY
+else
+    # HF_HUB_DISABLE_XET=1 是重点：huggingface_hub 新版默认用 Xet 后端，它在内存里缓冲分块，
+    # 下 1.7GB 权重时峰值会顶爆 AutoDL 无卡模式的 2GB cgroup 配额，被 OOM killer 干掉——表现
+    # 为一句没头没尾的 "Killed"，配合 set -e 直接让整个脚本中止在这里。退回普通 HTTP 流式下
+    # 载后内存占用和文件大小无关。并发也收到 1，进一步压低峰值。
+    HF_HUB_DISABLE_XET=1 python - <<'PY'
 from huggingface_hub import snapshot_download
 
 print("downloading openai/clip-vit-large-patch14-336 ...")
@@ -74,7 +90,11 @@ snapshot_download(
     ignore_patterns=["tf_model.h5", "*.msgpack", "README.md"],
     max_workers=1,
 )
+# 仓库名本身就能被 from_pretrained 解析（已在 HF 缓存里），写进去让两条路径的用法一致。
+with open("models_paths.env", "a", encoding="utf-8") as f:
+    f.write('export VISION_MODEL_PATH="openai/clip-vit-large-patch14-336"\n')
 PY
+fi
 
 echo "模型下载完成后的磁盘占用："
 df -h "$DATA_DISK"
