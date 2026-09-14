@@ -168,9 +168,15 @@ PY
         mv data/llava_instruct_150k.json data/llava_instruct_150k_full.json
     fi
 
+    # 先下到 .part 再改名：18GB 在国内断一次很常见，直接下成最终文件名的话，残留的半个 zip
+    # 会让上面这种 `[ ! -f ... ]` 判断误以为已经下好，跳过下载、到解压那步才报一个莫名其妙的
+    # 错。curl -C - 支持断点续传，重跑本段会接着上次的进度下。
     if [ ! -f data/train2017.zip ]; then
         echo "downloading COCO train2017 images (~18GB) ..."
-        curl -L -o data/train2017.zip http://images.cocodataset.org/zips/train2017.zip
+        curl -L -C - -o data/train2017.zip.part http://images.cocodataset.org/zips/train2017.zip
+        # zip 的中央目录在文件末尾，能读出目录就说明下全了
+        python -c "import zipfile, sys; zipfile.ZipFile('data/train2017.zip.part').namelist(); print('zip ok')"
+        mv data/train2017.zip.part data/train2017.zip
     fi
 
     # Stage-1 那段用的也叫 NUM_SAMPLES，这里单独开一个变量，两段才能在同一次运行里各取各的值。
