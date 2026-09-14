@@ -58,18 +58,21 @@ snapshot_download("Qwen/Qwen3-8B")
 PY
 fi
 
-python - <<'PY'
+# 这个仓库没发布 safetensors，权重是 pytorch_model.bin(~1.7GB) 和 tf_model.h5(~1.7GB) 两份，
+# 后者 CLIPVisionModel 根本不会读，只下需要的那份。
+#
+# HF_HUB_DISABLE_XET=1 是重点：huggingface_hub 新版默认用 Xet 后端，它在内存里缓冲分块，下
+# 1.7GB 的权重时峰值会顶爆 AutoDL 无卡模式的 2GB cgroup 配额，被 OOM killer 干掉——表现为一
+# 句没头没尾的 "Killed"，配合 set -e 直接让整个脚本中止在这里。退回普通 HTTP 流式下载后内存
+# 占用和文件大小无关。并发也收到 1，进一步压低峰值。
+HF_HUB_DISABLE_XET=1 python - <<'PY'
 from huggingface_hub import snapshot_download
 
-# 这个仓库没发布 safetensors，权重是 pytorch_model.bin(~1.7GB) 和 tf_model.h5(~1.7GB) 两份，
-# 后者 CLIPVisionModel 根本不会读。默认 8 线程把 11 个文件全拉下来，在 AutoDL 无卡模式那点
-# 内存配额下会被 OOM killer 干掉（表现为一句没头没尾的 "Killed"）。只下需要的那份，并发也
-# 收一收。
 print("downloading openai/clip-vit-large-patch14-336 ...")
 snapshot_download(
     "openai/clip-vit-large-patch14-336",
     ignore_patterns=["tf_model.h5", "*.msgpack", "README.md"],
-    max_workers=2,
+    max_workers=1,
 )
 PY
 
@@ -189,23 +192,42 @@ PY
 
     # Stage-1 那段用的也叫 NUM_SAMPLES，这里单独开一个变量，两段才能在同一次运行里各取各的值。
     STAGE2_NUM_SAMPLES="${STAGE2_NUM_SAMPLES:-50000}"
+    pip install ijson  # 流式 json 解析，见下面的注释；已装则秒过
     python - <<PY
 import json
-import random
-import zipfile
 import os
+import random
+import shutil
+import zipfile
 
+import ijson
+
+# json.load() 这个 218MB 的数组会爆内存：Python 的 dict/str 对象开销通常是文件体积的 3~5 倍，
+# 而 AutoDL 无卡模式的 cgroup 配额只有 2GB。改成 ijson 边解析边做蓄水池抽样，常驻内存只和
+# STAGE2_NUM_SAMPLES 成正比，和文件多大无关。use_float 避免 ijson 把数字解析成 Decimal
+# （json.dump 不认识 Decimal）。
 random.seed(42)
-with open("data/llava_instruct_150k_full.json", encoding="utf-8") as f:
-    full = json.load(f)
+n_target = $STAGE2_NUM_SAMPLES
 
-n = min($STAGE2_NUM_SAMPLES, len(full))
-subset = random.sample(full, n)
+reservoir = []
+total = 0
+with open("data/llava_instruct_150k_full.json", "rb") as f:
+    for item in ijson.items(f, "item", use_float=True):
+        total += 1
+        if len(reservoir) < n_target:
+            reservoir.append(item)
+        else:
+            j = random.randrange(total)
+            if j < n_target:
+                reservoir[j] = item
+
 with open("data/llava_instruct_150k.json", "w", encoding="utf-8") as f:
-    json.dump(subset, f, ensure_ascii=False)
+    json.dump(reservoir, f, ensure_ascii=False)
 
-image_names = {item["image"] for item in subset}
-print(f"sampled {len(subset)} / {len(full)} conversations, extracting {len(image_names)} images ...")
+image_names = {item["image"] for item in reservoir}
+del reservoir  # 抽样结果已经落盘，解压阶段只需要文件名集合
+print(f"sampled {len(image_names)} unique images from {total} conversations, extracting ...")
+
 os.makedirs("data/images", exist_ok=True)
 missing = 0
 with zipfile.ZipFile("data/train2017.zip") as zf:
@@ -215,7 +237,7 @@ with zipfile.ZipFile("data/train2017.zip") as zf:
             continue  # a previous run may already have extracted this file
         try:
             with zf.open(f"train2017/{name}") as src, open(dest, "wb") as out:
-                out.write(src.read())
+                shutil.copyfileobj(src, out)
         except KeyError:
             missing += 1
 if missing:
