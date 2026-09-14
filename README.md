@@ -14,9 +14,23 @@ LLaVA 风格多模态视觉问答系统重构版：CLIP ViT + MLP Projector + Qw
 - **Stage-1（已完成）**：projector 对齐预训练。图像 → vision tower → projector → 替换
   文本序列中 `<image>` 占位符 → 过 Qwen3-8B → 对 answer 部分 token 计算 next-token
   cross-entropy → 只反传更新 projector，vision tower / language model 全程冻结。
-- **Stage-2（规划中）**：指令微调。在 Stage-1 权重基础上，用指令型问答数据（如
-  LLaVA-Instruct-150K）继续训练，projector 全量更新 + language model 用 LoRA
+- **Stage-2（进行中）**：指令微调。在 Stage-1 权重基础上，用 LLaVA-Instruct-150K 风格的
+  多轮指令数据（`src/data/VQAInstructDataset`，`USER: .../ASSISTANT: ...` 多轮拼接，只对
+  ASSISTANT 段计算 loss）继续训练，projector 全量更新 + language model 用 LoRA（`peft`）
   微调，让模型学会针对具体问题作答，而不只是生成通用图片描述。
+
+  ```
+  # 环境准备时顺带下载指令数据（LLaVA-Instruct-150K annotations + COCO train2017 图片，~18GB）
+  DOWNLOAD_STAGE2_DATA=1 bash scripts/prepare_autodl.sh
+
+  python -m src.train.train_stage2 \
+      --image_dir data/images --annotations data/llava_instruct_150k.json \
+      --stage1_checkpoint outputs/stage1_projector/final_model
+  ```
+
+  产出的 `final_model/`（config + tokenizer + `projector.pt` + LoRA adapter）可以直接传给
+  `generate.py`/`serve_repl.py` 的 `--checkpoint`：两个脚本都会自动探测目录里是否有
+  `adapter_config.json`，据此决定加载 LoRA 并切换到 Stage-2 训练时用的 prompt 格式。
 
 ## 模型权重
 
@@ -41,5 +55,6 @@ docs/          设计笔记
 ## 状态
 
 Stage-1 projector 对齐训练已完成并验证（`src/inference/serve_repl.py` 常驻推理 REPL
-定性抽查：模型能看图生成语义相关的描述），权重已发布到 HuggingFace。当前推进
-Stage-2 指令微调，让模型学会针对具体问题作答。
+定性抽查：模型能看图生成语义相关的描述），权重已发布到 HuggingFace。Stage-2
+LoRA 指令微调的代码（`src/train/train_stage2.py`、`VQAInstructDataset`、
+`VQAForConditionalGeneration.prepare_for_stage2`）已就绪，训练尚未在 AutoDL 上跑起来。

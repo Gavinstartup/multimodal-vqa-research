@@ -145,6 +145,25 @@ class VQAForConditionalGeneration(VQAPreTrainedModel):
         for param in self.multi_modal_projector.parameters():
             param.requires_grad = True
 
+    def prepare_for_stage2(self, lora_config):
+        """Freezes the vision tower, wraps language_model with LoRA adapters, and leaves
+        the projector fully trainable.
+
+        Stage-1 already aligned the projector to produce embeddings the (still frozen)
+        LM can read; Stage-2 keeps the projector updating (it's small, and instruction
+        data shifts the answer distribution away from plain captions) while teaching the
+        LM itself to condition its answer on the specific question via LoRA, instead of
+        full fine-tuning an 8B model. peft.get_peft_model freezes every base LM param on
+        its own, so vision_tower is the only module this method has to freeze explicitly.
+        """
+        from peft import get_peft_model
+
+        for param in self.vision_tower.parameters():
+            param.requires_grad = False
+        for param in self.multi_modal_projector.parameters():
+            param.requires_grad = True
+        self.language_model = get_peft_model(self.language_model, lora_config)
+
     @classmethod
     def from_pretrained_components(
         cls,

@@ -19,6 +19,8 @@ from configs import stage1_config as cfg
 from src.model import VQAConfig, VQAForConditionalGeneration
 from src.utils import resolve_device, resolve_dtype
 
+_ADAPTER_CONFIG_NAME = "adapter_config.json"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,12 @@ def main():
         projector_state = projector_state["projector_state_dict"]
     model.multi_modal_projector.load_state_dict(projector_state)
 
+    is_stage2 = os.path.exists(os.path.join(args.checkpoint, _ADAPTER_CONFIG_NAME))
+    if is_stage2:
+        from peft import PeftModel
+        logger.info("Found LoRA adapter in checkpoint, loading Stage-2 fine-tuned weights ...")
+        model.language_model = PeftModel.from_pretrained(model.language_model, args.checkpoint)
+
     model.to(device=device, dtype=dtype)
     model.eval()
 
@@ -74,7 +82,10 @@ def main():
 
     image_token = cfg.ModelSettings.IMAGE_TOKEN
     num_image_tokens = model.config.num_image_tokens
-    prompt = f"{image_token * num_image_tokens}\n{args.question.strip()}\n"
+    image_block = f"{image_token * num_image_tokens}\n{args.question.strip()}"
+    # Stage-2 was trained on "USER: ...\nASSISTANT: " turns (see VQAInstructDataset);
+    # Stage-1 checkpoints (no adapter) keep the plain format they were trained with.
+    prompt = f"USER: {image_block}\nASSISTANT: " if is_stage2 else f"{image_block}\n"
     encoded = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(device)
 
     generated_ids = model.generate(

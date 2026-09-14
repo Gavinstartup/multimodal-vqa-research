@@ -29,6 +29,8 @@ from src.utils import resolve_device, resolve_dtype
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+_ADAPTER_CONFIG_NAME = "adapter_config.json"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VQA persistent inference REPL")
@@ -66,9 +68,15 @@ def load_model(args, device, dtype):
         projector_state = projector_state["projector_state_dict"]
     model.multi_modal_projector.load_state_dict(projector_state)
 
+    is_stage2 = os.path.exists(os.path.join(args.checkpoint, _ADAPTER_CONFIG_NAME))
+    if is_stage2:
+        from peft import PeftModel
+        logger.info("Found LoRA adapter in checkpoint, loading Stage-2 fine-tuned weights ...")
+        model.language_model = PeftModel.from_pretrained(model.language_model, args.checkpoint)
+
     model.to(device=device, dtype=dtype)
     model.eval()
-    return model, tokenizer, image_processor
+    return model, tokenizer, image_processor, is_stage2
 
 
 def encode_image(model, image_processor, image_path, device):
@@ -78,10 +86,11 @@ def encode_image(model, image_processor, image_path, device):
         return model.get_image_features(pixel_values)
 
 
-def answer(model, tokenizer, image_features, question, args, device):
+def answer(model, tokenizer, image_features, question, args, device, is_stage2):
     num_image_tokens = model.config.num_image_tokens
     image_token = cfg.ModelSettings.IMAGE_TOKEN
-    prompt = f"{image_token * num_image_tokens}\n{question.strip()}\n"
+    image_block = f"{image_token * num_image_tokens}\n{question.strip()}"
+    prompt = f"USER: {image_block}\nASSISTANT: " if is_stage2 else f"{image_block}\n"
     encoded = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(device)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -112,7 +121,7 @@ def main():
     device = resolve_device()
     dtype = resolve_dtype(device, args.dtype)
 
-    model, tokenizer, image_processor = load_model(args, device, dtype)
+    model, tokenizer, image_processor, is_stage2 = load_model(args, device, dtype)
     logger.info("Model loaded once, ready. Type 'image: <path>' to set/switch image, 'quit' to exit.")
 
     current_image_features = None
@@ -144,7 +153,7 @@ def main():
             continue
 
         print(f"[{current_image_path}] ", end="")
-        answer(model, tokenizer, current_image_features, user_input, args, device)
+        answer(model, tokenizer, current_image_features, user_input, args, device, is_stage2)
 
 
 if __name__ == "__main__":

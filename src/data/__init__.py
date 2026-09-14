@@ -1,3 +1,3 @@
-from .dataset import VQADataset, build_collate_fn
+from .dataset import VQADataset, VQAInstructDataset, build_collate_fn
 
-__all__ = ["VQADataset", "build_collate_fn"]
+__all__ = ["VQADataset", "VQAInstructDataset", "build_collate_fn"]
