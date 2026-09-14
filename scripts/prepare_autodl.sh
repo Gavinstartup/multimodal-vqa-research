@@ -61,8 +61,16 @@ fi
 python - <<'PY'
 from huggingface_hub import snapshot_download
 
+# 这个仓库没发布 safetensors，权重是 pytorch_model.bin(~1.7GB) 和 tf_model.h5(~1.7GB) 两份，
+# 后者 CLIPVisionModel 根本不会读。默认 8 线程把 11 个文件全拉下来，在 AutoDL 无卡模式那点
+# 内存配额下会被 OOM killer 干掉（表现为一句没头没尾的 "Killed"）。只下需要的那份，并发也
+# 收一收。
 print("downloading openai/clip-vit-large-patch14-336 ...")
-snapshot_download("openai/clip-vit-large-patch14-336")
+snapshot_download(
+    "openai/clip-vit-large-patch14-336",
+    ignore_patterns=["tf_model.h5", "*.msgpack", "README.md"],
+    max_workers=2,
+)
 PY
 
 echo "模型下载完成后的磁盘占用："
