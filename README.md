@@ -20,7 +20,7 @@ LLaVA 风格多模态视觉问答系统重构版：CLIP ViT + MLP Projector + Qw
   微调，让模型学会针对具体问题作答，而不只是生成通用图片描述。
 
   ```
-  # 环境准备时顺带下载指令数据（LLaVA-Instruct-150K annotations + COCO train2017 图片，~18GB）
+  # 环境准备时顺带下载指令数据（annotations 走魔搭 ~218MB，COCO train2017 图片走官方源 ~18GB）
   DOWNLOAD_STAGE2_DATA=1 bash scripts/prepare_autodl.sh
 
   python -m src.train.train_stage2 \

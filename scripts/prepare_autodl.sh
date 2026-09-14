@@ -123,19 +123,36 @@ PY
 fi
 
 # Stage-2 指令微调数据集（LLaVA-Instruct-150K）默认不下载，需要时设置
-# DOWNLOAD_STAGE2_DATA=1 再跑本脚本。annotations json 走 HF（本脚本顶部已把 HF_ENDPOINT
-# 指到国内镜像），图片则是 COCO train2017：llava_instruct_150k.json 的 "image" 字段是裸的
-# 12 位文件名（如 "000000033471.jpg"），正好是 train2017 的命名约定；train2014 里同一张图
-# 叫 COCO_train2014_000000033471.jpg，名字对不上。train2017 是 train2014 的超集，150K 用到
-# 的 id 都覆盖得到。ModelScope 上没有确认过带图片打包的对应版本，所以从
-# images.cocodataset.org 官方地址下（国内网络这一步可能比较慢，~18GB，慢的话可以手动下好
-# train2017.zip 放到 data/ 下再重跑本段）。同样是下完整 zip、只解压用到的图片子集、用完
-# 立刻删 zip，做法跟 Stage-1 的 images.zip 处理一致。
+# DOWNLOAD_STAGE2_DATA=1 再跑本脚本。
+#
+# annotations 和图片来源不同。annotations 默认走魔搭的 AI-ModelScope/LLaVA-Instruct-150K
+# （和 HF 上的 liuhaotian/LLaVA-Instruct-150K 同名同构，验证过文件列表一致），国内快很多，
+# 想强制走 HF 设 DATA_SOURCE=hf。只取 llava_instruct_150k.json（~218MB）这一个文件，同仓库
+# 里还有个 982MB 的 llava_v1_5_mix665k.json，整仓拖下来纯属浪费。
+#
+# 图片两边都没有：这两个仓库发布的都只是 json。用的是 COCO train2017 —— json 的 "image"
+# 字段是裸的 12 位文件名（如 "000000033471.jpg"），正好是 train2017 的命名约定；train2014
+# 里同一张图叫 COCO_train2014_000000033471.jpg，名字对不上。train2017 是 train2014 的超集，
+# 150K 用到的 id 都覆盖得到。所以图片只能从 images.cocodataset.org 官方地址下（~18GB，国内
+# 网络下这是整个流程最慢的一步，慢的话可以手动下好 train2017.zip 放到 data/ 下再重跑本段）。
+# 同样是下完整 zip、只解压用到的图片子集、用完立刻删 zip，做法跟 Stage-1 的 images.zip 一致。
 #
 # 注意 Stage-2 的 COCO 图片和 Stage-1 的 LAION/CC/SBU 图片共用 data/images/。文件名不冲突
 # （Stage-1 的带 00453/ 这样的子目录前缀），但磁盘占用是叠加的。
 if [ "${DOWNLOAD_STAGE2_DATA:-0}" = "1" ]; then
-    python - <<'PY'
+    if [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
+        pip install modelscope  # 若 MODEL_SOURCE=hf 时没装过，这里兜底装一下；已装则秒过
+        python - <<'PY'
+from modelscope import dataset_snapshot_download
+
+print("downloading AI-ModelScope/LLaVA-Instruct-150K/llava_instruct_150k.json ...")
+dataset_snapshot_download(
+    "AI-ModelScope/LLaVA-Instruct-150K", local_dir="data",
+    allow_file_pattern="llava_instruct_150k.json",
+)
+PY
+    else
+        python - <<'PY'
 from huggingface_hub import hf_hub_download
 
 print("downloading LLaVA-Instruct-150K/llava_instruct_150k.json ...")
@@ -144,6 +161,7 @@ hf_hub_download(
     repo_type="dataset", local_dir="data",
 )
 PY
+    fi
 
     # 全量 annotations 单独留一份：采样结果原地覆写的话，之后想换更大的采样数就只能重新下。
     if [ ! -f data/llava_instruct_150k_full.json ]; then
