@@ -7,7 +7,7 @@ set -euo pipefail
 # 必须全部落在数据盘上，不能用默认的 ~/.cache（否则会悄悄写满系统盘）。DOWNLOAD_STAGE1_DATA=1
 # 时还会临时下载 images.zip(魔搭源 ~27.4GB / HF 源 ~20GB，只解压 NUM_SAMPLES 张后立刻删掉)，
 # 峰值在 ~50GB 左右（50GB 数据盘几乎没有余量，建议数据盘至少留 60GB+）。DOWNLOAD_STAGE2_DATA=1
-# 会再临时下载 COCO train2017.zip(~18GB，同样只解压用到的图片后删掉)，两段都跑的话峰值还要
+# 会再临时下载 COCO train2017.zip(~19.3GB，同样只解压用到的图片后删掉)，两段都跑的话峰值还要
 # 再高一截，建议数据盘留 80GB+。DATA_DISK 默认指向 AutoDL 的数据盘路径，其他平台按需覆盖。
 # 前提：整个项目目录本身也要 clone/上传到数据盘下（例如 /root/autodl-tmp/VQA），这样
 # configs/stage1_config.py 里默认的相对路径 data/ 才会落在数据盘，而不是系统盘。
@@ -161,11 +161,10 @@ fi
 # 想强制走 HF 设 DATA_SOURCE=hf。只取 llava_instruct_150k.json（~218MB）这一个文件，同仓库
 # 里还有个 982MB 的 llava_v1_5_mix665k.json，整仓拖下来纯属浪费。
 #
-# 图片两边都没有：这两个仓库发布的都只是 json。用的是 COCO train2017 —— json 的 "image"
-# 字段是裸的 12 位文件名（如 "000000033471.jpg"），正好是 train2017 的命名约定；train2014
-# 里同一张图叫 COCO_train2014_000000033471.jpg，名字对不上。train2017 是 train2014 的超集，
-# 150K 用到的 id 都覆盖得到。所以图片只能从 images.cocodataset.org 官方地址下（~18GB，国内
-# 网络下这是整个流程最慢的一步，慢的话可以手动下好 train2017.zip 放到 data/ 下再重跑本段）。
+# 图片这两个仓库都没有（发布的都只是 json），得单独下 COCO train2017：json 的 "image" 字段是
+# 裸的 12 位文件名（如 "000000033471.jpg"），正好是 train2017 的命名约定；train2014 里同一张
+# 图叫 COCO_train2014_000000033471.jpg，名字对不上。train2017 是 train2014 的超集，150K 用到
+# 的 id 都覆盖得到。具体下载源见下面那段（默认魔搭，官方源在国内基本不可用）。
 # 同样是下完整 zip、只解压用到的图片子集、用完立刻删 zip，做法跟 Stage-1 的 images.zip 一致。
 #
 # 注意 Stage-2 的 COCO 图片和 Stage-1 的 LAION/CC/SBU 图片共用 data/images/。文件名不冲突
@@ -199,15 +198,29 @@ PY
         mv data/llava_instruct_150k.json data/llava_instruct_150k_full.json
     fi
 
-    # 先下到 .part 再改名：18GB 在国内断一次很常见，直接下成最终文件名的话，残留的半个 zip
-    # 会让上面这种 `[ ! -f ... ]` 判断误以为已经下好，跳过下载、到解压那步才报一个莫名其妙的
-    # 错。curl -C - 支持断点续传，重跑本段会接着上次的进度下。
+    # 图片默认也走魔搭：images.cocodataset.org 在 AutoDL 上实测只有 ~0.06MB/s，19GB 要下三个
+    # 月，等于不可用；魔搭的 PAI/COCO2017 是同一个 train2017.zip（19.34GB），实测 ~8.4MB/s，
+    # 约 40 分钟。dataset_snapshot_download 自带断点续传和 sha256 校验，不必再手搓 .part。
+    # DATA_SOURCE=hf 时回退到官方源（境外网络下官方源更直接），那条路仍然先下 .part 再改名：
+    # 直接下成最终文件名的话，断点残留的半个 zip 会让 `[ ! -f ... ]` 误判成已下好，跳过下载、
+    # 到解压那步才报一个莫名其妙的错。
     if [ ! -f data/train2017.zip ]; then
-        echo "downloading COCO train2017 images (~18GB) ..."
-        curl -L -C - -o data/train2017.zip.part http://images.cocodataset.org/zips/train2017.zip
-        # zip 的中央目录在文件末尾，能读出目录就说明下全了
-        python -c "import zipfile, sys; zipfile.ZipFile('data/train2017.zip.part').namelist(); print('zip ok')"
-        mv data/train2017.zip.part data/train2017.zip
+        if [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
+            echo "downloading COCO train2017 images (~19GB) from ModelScope ..."
+            python - <<'PY'
+from modelscope import dataset_snapshot_download
+
+dataset_snapshot_download(
+    "PAI/COCO2017", local_dir="data", allow_file_pattern="train2017.zip",
+)
+PY
+        else
+            echo "downloading COCO train2017 images (~19GB) from images.cocodataset.org ..."
+            curl -L -C - -o data/train2017.zip.part http://images.cocodataset.org/zips/train2017.zip
+            # zip 的中央目录在文件末尾，能读出目录就说明下全了
+            python -c "import zipfile, sys; zipfile.ZipFile('data/train2017.zip.part').namelist(); print('zip ok')"
+            mv data/train2017.zip.part data/train2017.zip
+        fi
     fi
 
     # Stage-1 那段用的也叫 NUM_SAMPLES，这里单独开一个变量，两段才能在同一次运行里各取各的值。
