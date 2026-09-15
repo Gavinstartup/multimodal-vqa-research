@@ -63,7 +63,8 @@ def parse_args():
         "--resume_from", type=str, default=None,
         help="Directory containing a projector_latest.pt/projector_best.pt and a "
              "lora_latest/lora_best adapter dir from an interrupted stage-2 run. "
-             "Optimizer/scheduler state and epoch position are not restored.",
+             "Restores optimizer + LR schedule + batch position from projector_latest.pt "
+             "(projector_best.pt carries weights only, so resuming from it restarts warmup).",
     )
     parser.add_argument("--val_split", type=float, default=cfg.TrainingSettings.VAL_SPLIT)
     parser.add_argument("--early_stopping", type=int, default=cfg.TrainingSettings.EARLY_STOPPING_PATIENCE)
@@ -107,8 +108,15 @@ def save_checkpoint(model, output_dir, tag, extra=None):
 
 def run_epoch(
     model, loader, device, optimizer, grad_accum_steps, epoch, epochs, log_interval, writer, train,
-    save_every_steps=0, output_dir=None, scheduler=None,
+    save_every_steps=0, output_dir=None, scheduler=None, start_batch=0,
 ):
+    """start_batch: how many batches of this epoch a previous (interrupted) run already
+    did. We don't fast-forward the loader to that position — with shuffle=True the order
+    differs between runs anyway, so there is no position to return to. Instead we run
+    `len(loader) - start_batch` batches of the freshly shuffled order, which leaves the
+    optimizer step count (and therefore the restored LR schedule) exactly where it should
+    end up. The cost is that the samples seen are a fresh random draw rather than strictly
+    the ones the interrupted run missed."""
     model.train(train)
     total_loss, n_batches = 0.0, 0
     running_loss = 0.0
@@ -116,10 +124,15 @@ def run_epoch(
     if train:
         optimizer.zero_grad()
 
+    n_batches_to_run = len(loader) - start_batch if train else len(loader)
+    last_idx = n_batches_to_run - 1
+
     desc = f"Epoch {epoch + 1}/{epochs} [{'train' if train else 'val'}]"
     with torch.set_grad_enabled(train):
-        with tqdm(loader, desc=desc) as pbar:
+        with tqdm(loader, desc=desc, total=n_batches_to_run) as pbar:
             for batch_idx, batch in enumerate(pbar):
+                if batch_idx >= n_batches_to_run:
+                    break
                 batch = {k: v.to(device) for k, v in batch.items()}
                 outputs = model(
                     input_ids=batch["input_ids"],
@@ -132,7 +145,7 @@ def run_epoch(
 
                 if train:
                     (loss / grad_accum_steps).backward()
-                    if (batch_idx + 1) % grad_accum_steps == 0 or batch_idx == len(loader) - 1:
+                    if (batch_idx + 1) % grad_accum_steps == 0 or batch_idx == last_idx:
                         optimizer.step()
                         # Per optimizer step, not per epoch: a single-epoch run gets no
                         # decay at all from an epoch-level scheduler.
@@ -144,7 +157,9 @@ def run_epoch(
                 running_loss += loss.item()
                 n_batches += 1
 
-                global_step = epoch * len(loader) + batch_idx
+                # Offset by start_batch so a resumed run keeps writing TensorBoard points
+                # to the right place on the x axis instead of overwriting the earlier ones.
+                global_step = epoch * len(loader) + start_batch + batch_idx
 
                 if train and (batch_idx + 1) % log_interval == 0:
                     avg = running_loss / log_interval
@@ -155,7 +170,15 @@ def run_epoch(
                     running_loss = 0.0
 
                 if train and save_every_steps and (batch_idx + 1) % save_every_steps == 0:
-                    save_checkpoint(model, output_dir, "latest", extra={"epoch": epoch + 1, "step": batch_idx + 1})
+                    # Optimizer + scheduler state go in too: without them --resume_from
+                    # restarts warmup from zero and throws away Adam's momentum, which on a
+                    # 40-hour single-epoch run is most of what makes resuming worth doing.
+                    save_checkpoint(model, output_dir, "latest", extra={
+                        "epoch": epoch + 1,
+                        "step": start_batch + batch_idx + 1,
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                    })
 
     avg_loss = total_loss / max(n_batches, 1)
     return avg_loss
@@ -210,6 +233,7 @@ def main():
     model.prepare_for_stage2(lora_config)
     model.language_model.print_trainable_parameters()
 
+    resume_state = None
     if args.resume_from:
         resume_projector = os.path.join(args.resume_from, "projector_latest.pt")
         if not os.path.isfile(resume_projector):
@@ -225,6 +249,8 @@ def main():
         # existing adapter is already trainable. Renaming the adapter would break this.
         model.language_model.load_adapter(resume_lora, adapter_name="default", is_trainable=True)
         logger.info("Resumed projector + LoRA weights from %s", args.resume_from)
+        # optimizer/scheduler 还没建出来，先把 payload 留到下面恢复。
+        resume_state = resume_ckpt
 
     if args.gradient_checkpointing:
         model.language_model.gradient_checkpointing_enable()
@@ -282,6 +308,24 @@ def main():
         total_steps, warmup_steps, args.lr, args.projector_lr,
     )
 
+    resume_batch = 0
+    if resume_state is not None:
+        if resume_state.get("optimizer_state_dict"):
+            optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+        if resume_state.get("scheduler_state_dict"):
+            scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+        resume_batch = int(resume_state.get("step") or 0)
+        logger.info(
+            "Resumed optimizer + LR schedule at batch %d/%d (optimizer step %d/%d)",
+            resume_batch, len(train_loader), scheduler.last_epoch, total_steps,
+        )
+        if not resume_state.get("optimizer_state_dict"):
+            logger.warning(
+                "Checkpoint has no optimizer state (written before this was saved); "
+                "warmup and Adam momentum restart from scratch."
+            )
+        del resume_state  # 优化器状态有几百 MB，早点还给内存
+
     best_val_loss = float("inf")
     early_stopping_counter = 0
 
@@ -290,6 +334,7 @@ def main():
             model, train_loader, device, optimizer, args.grad_accum_steps,
             epoch, args.epochs, args.log_interval, writer, train=True,
             save_every_steps=args.save_every_steps, output_dir=args.output_dir, scheduler=scheduler,
+            start_batch=resume_batch if epoch == 0 else 0,
         )
         val_loss = run_epoch(
             model, val_loader, device, optimizer, args.grad_accum_steps,

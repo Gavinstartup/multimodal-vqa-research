@@ -53,11 +53,19 @@ class TrainingSettings:
 
 
 class PathSettings:
-    # LLaVA-Instruct-150K + COCO train2017 图片（json 里的 "image" 是裸 12 位文件名，就是
-    # train2017 的命名）。和 Stage-1 没有可复用的图片：那一阶段用的是 LLaVA-Pretrain 的
-    # LAION/CC/SBU 图片，得靠 scripts/prepare_autodl.sh 的 DOWNLOAD_STAGE2_DATA=1 另外下。
+    # LLaVA-1.5 的 llava_v1_5_mix665k.json 中指向 coco/train2017 的那 364,100 条
+    # （VQAv2 / OKVQA / A-OKVQA / RefCOCO + 原 LLaVA-Instruct-150K），由
+    # scripts/prepare_autodl.sh 的 STAGE2_RECIPE=mix665k_coco 过滤产出——它同时把
+    # "coco/train2017/xxx.jpg" 的前缀剥成裸文件名，所以 IMAGE_DIR 仍是扁平的 data/images。
+    #
+    # 换掉纯 LLaVA-Instruct-150K 的原因：那份数据全是 GPT-4 从 caption 生成的长篇描述，
+    # 模型靠语言先验把话说圆就能拿到低 loss，视觉侧收不到纠错信号——实测训完能流利作答但
+    # 会把「一只长颈鹿两只犀牛」说成斑马和牛。mix665k 里的短答案和区域指令数据没有这个空子可钻。
+    #
+    # 和 Stage-1 没有可复用的图片：那一阶段用的是 LLaVA-Pretrain 的 LAION/CC/SBU 图片，
+    # 得靠 scripts/prepare_autodl.sh 的 DOWNLOAD_STAGE2_DATA=1 另外下 COCO train2017。
     DATA_DIR = Path("data")
     IMAGE_DIR = DATA_DIR / "images"
-    ANNOTATIONS_JSON = DATA_DIR / "llava_instruct_150k.json"
+    ANNOTATIONS_JSON = DATA_DIR / "llava_v1_5_mix665k_coco.json"
     STAGE1_CHECKPOINT = Path("outputs") / "stage1_projector" / "final_model"
     OUTPUT_DIR = Path("outputs") / "stage2_instruct"

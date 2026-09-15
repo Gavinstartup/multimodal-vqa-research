@@ -170,9 +170,44 @@ fi
 # 注意 Stage-2 的 COCO 图片和 Stage-1 的 LAION/CC/SBU 图片共用 data/images/。文件名不冲突
 # （Stage-1 的带 00453/ 这样的子目录前缀），但磁盘占用是叠加的。
 if [ "${DOWNLOAD_STAGE2_DATA:-0}" = "1" ]; then
+    # 两套 Stage-2 数据配方：
+    #   instruct150k   —— LLaVA-Instruct-150K，全是 GPT-4 从 caption 生成的长篇描述。
+    #   mix665k_coco   —— LLaVA-1.5 的 llava_v1_5_mix665k.json 中指向 coco/train2017 的那
+    #                     364,100 条（VQAv2 / OKVQA / A-OKVQA / RefCOCO + 原 150K）。
+    # 换配方的原因见 docs/：只用 instruct150k 训出来的模型答得流利但视觉 grounding 很差——
+    # 长篇描述里靠语言先验把话说圆就能拿到低 loss，视觉侧收不到纠错信号；mix665k 的短答案和
+    # 区域指令数据传不出图像信息就压不下 loss。两条配方共用同一批 COCO train2017 图片。
+    STAGE2_RECIPE="${STAGE2_RECIPE:-instruct150k}"
+
+    if [ "$STAGE2_RECIPE" = "mix665k_coco" ]; then
+        if [ -f data/llava_v1_5_mix665k.json ]; then
+            echo "annotations 已存在（data/llava_v1_5_mix665k.json），跳过下载"
+        elif [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
+            pip install modelscope  # 若 MODEL_SOURCE=hf 时没装过，这里兜底装一下；已装则秒过
+            python - <<'PY'
+from modelscope import dataset_snapshot_download
+
+# 和 llava_instruct_150k.json 同一个仓库，不必新增数据源。
+print("downloading AI-ModelScope/LLaVA-Instruct-150K/llava_v1_5_mix665k.json (~1.0GB) ...")
+dataset_snapshot_download(
+    "AI-ModelScope/LLaVA-Instruct-150K", local_dir="data",
+    allow_file_pattern="llava_v1_5_mix665k.json",
+)
+PY
+        else
+            python - <<'PY'
+from huggingface_hub import hf_hub_download
+
+print("downloading LLaVA-Instruct-150K/llava_v1_5_mix665k.json (~1.0GB) ...")
+hf_hub_download(
+    repo_id="liuhaotian/LLaVA-Instruct-150K", filename="llava_v1_5_mix665k.json",
+    repo_type="dataset", local_dir="data",
+)
+PY
+        fi
     # 下面会把 annotations 改名成 _full.json 留底，所以原名文件必然不存在，下载器每次重跑都会
     # 认为要重新拉一遍这 229MB。有留底就直接跳过下载段。
-    if [ -f data/llava_instruct_150k_full.json ]; then
+    elif [ -f data/llava_instruct_150k_full.json ]; then
         echo "annotations 已存在（data/llava_instruct_150k_full.json），跳过下载"
     elif [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
         pip install modelscope  # 若 MODEL_SOURCE=hf 时没装过，这里兜底装一下；已装则秒过
@@ -198,7 +233,8 @@ PY
     fi
 
     # 全量 annotations 单独留一份：采样结果原地覆写的话，之后想换更大的采样数就只能重新下。
-    if [ ! -f data/llava_instruct_150k_full.json ]; then
+    # mix665k_coco 走的是过滤而非原地覆写（输出是另一个文件名），不需要这层留底。
+    if [ "$STAGE2_RECIPE" != "mix665k_coco" ] && [ ! -f data/llava_instruct_150k_full.json ]; then
         mv data/llava_instruct_150k.json data/llava_instruct_150k_full.json
     fi
 
@@ -227,9 +263,67 @@ PY
         fi
     fi
 
+    pip install ijson  # 流式 json 解析，见下面的注释；已装则秒过
+
+    if [ "$STAGE2_RECIPE" = "mix665k_coco" ]; then
+        python - <<'PY'
+import json
+import os
+import shutil
+import zipfile
+
+import ijson
+
+# 和下面 instruct150k 那段同样的理由用 ijson：这个 json 有 1.03GB，json.load() 出来的
+# dict/str 对象通常是文件体积的 3~5 倍，而 AutoDL 无卡模式的 cgroup 配额只有 2GB。
+# 这里连蓄水池都不需要——要的是全部 coco 条目，所以边解析边写盘，常驻内存只有那个
+# 文件名集合（~11 万个字符串，十几 MB）。use_float 避免 ijson 产出 Decimal（json.dump 不认）。
+PREFIX = "coco/train2017/"
+src = "data/llava_v1_5_mix665k.json"
+dst = "data/llava_v1_5_mix665k_coco.json"
+
+# json 里的路径形如 "coco/train2017/000000033471.jpg"，剥掉前缀存成裸文件名，就能沿用
+# 现有的扁平 data/images/ 布局和 configs 里的 IMAGE_DIR 默认值，不用动训练侧任何代码。
+image_names = set()
+total = kept = 0
+with open(src, "rb") as f, open(dst, "w", encoding="utf-8") as out:
+    out.write("[")
+    for item in ijson.items(f, "item", use_float=True):
+        total += 1
+        image = item.get("image")
+        if not image or not image.startswith(PREFIX):
+            continue  # 纯文本的 ShareGPT 条目，以及 vg/gqa/ocr_vqa/textvqa 的图片
+        name = image[len(PREFIX):]
+        item["image"] = name
+        image_names.add(name)
+        if kept:
+            out.write(",")
+        json.dump(item, out, ensure_ascii=False)
+        kept += 1
+    out.write("]")
+
+print(f"kept {kept}/{total} conversations ({len(image_names)} unique images), extracting ...")
+
+os.makedirs("data/images", exist_ok=True)
+missing = 0
+with zipfile.ZipFile("data/train2017.zip") as zf:
+    for name in image_names:
+        dest = os.path.join("data/images", name)
+        if os.path.exists(dest):
+            continue  # 上一轮配方已经解压过的那几万张直接复用
+        try:
+            with zf.open(f"train2017/{name}") as src_fp, open(dest, "wb") as out_fp:
+                shutil.copyfileobj(src_fp, out_fp)
+        except KeyError:
+            missing += 1
+if missing:
+    print(f"warning: {missing} image(s) absent from train2017.zip; VQAInstructDataset will skip those samples")
+print("extraction done")
+PY
+        echo "数据集就绪（mix665k 的 COCO 子集），annotations: data/llava_v1_5_mix665k_coco.json  images: data/images"
+    else
     # Stage-1 那段用的也叫 NUM_SAMPLES，这里单独开一个变量，两段才能在同一次运行里各取各的值。
     STAGE2_NUM_SAMPLES="${STAGE2_NUM_SAMPLES:-50000}"
-    pip install ijson  # 流式 json 解析，见下面的注释；已装则秒过
     python - <<PY
 import json
 import os
@@ -281,9 +375,10 @@ if missing:
     print(f"warning: {missing} image(s) absent from train2017.zip; VQAInstructDataset will skip those samples")
 print("subset extraction done")
 PY
+        echo "数据集就绪（随机采样 $STAGE2_NUM_SAMPLES 条），annotations: data/llava_instruct_150k.json  images: data/images"
+    fi
 
     rm -f data/train2017.zip
-    echo "数据集就绪（随机采样 $STAGE2_NUM_SAMPLES 条），annotations: data/llava_instruct_150k.json  images: data/images"
 fi
 
 echo "最终磁盘占用："
