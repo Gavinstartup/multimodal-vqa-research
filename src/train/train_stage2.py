@@ -93,7 +93,15 @@ def save_checkpoint(model, output_dir, tag, extra=None):
     if extra:
         projector_payload.update(extra)
     torch.save(projector_payload, os.path.join(output_dir, f"projector_{tag}.pt"))
-    model.language_model.save_pretrained(os.path.join(output_dir, f"lora_{tag}"))
+    # save_embedding_layers=False: peft's "auto" writes the full embed_tokens + lm_head
+    # (1.24B params, 2.5GB) whenever the vocab was resized, which it always is here —
+    # resize_token_embeddings() shrinks Qwen3's 151936 rows to the tokenizer's 151670.
+    # Those rows are frozen and a deterministic truncation of the base weights, so the
+    # load path rebuilds them bit-identically; saving them just makes every rolling
+    # checkpoint 30x bigger and slower.
+    model.language_model.save_pretrained(
+        os.path.join(output_dir, f"lora_{tag}"), save_embedding_layers=False
+    )
     logger.info("Saved %s checkpoint (projector + LoRA adapter) to %s", tag, output_dir)
 
 
@@ -319,7 +327,7 @@ def main():
     model.config.save_pretrained(final_model_dir)
     tokenizer.save_pretrained(final_model_dir)
     torch.save(model.multi_modal_projector.state_dict(), os.path.join(final_model_dir, "projector.pt"))
-    model.language_model.save_pretrained(final_model_dir)
+    model.language_model.save_pretrained(final_model_dir, save_embedding_layers=False)
     logger.info(
         "Training complete. Config + tokenizer + projector.pt + LoRA adapter (best val_loss) saved to %s",
         final_model_dir,
