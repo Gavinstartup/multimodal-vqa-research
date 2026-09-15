@@ -238,13 +238,31 @@ PY
         mv data/llava_instruct_150k.json data/llava_instruct_150k_full.json
     fi
 
-    # 图片默认也走魔搭：images.cocodataset.org 在 AutoDL 上实测只有 ~0.06MB/s，19GB 要下三个
-    # 月，等于不可用；魔搭的 PAI/COCO2017 是同一个 train2017.zip（19.34GB），实测 ~8.4MB/s，
-    # 约 40 分钟。dataset_snapshot_download 自带断点续传和 sha256 校验，不必再手搓 .part。
+    # AutoDL 把常用公开数据集只读挂在 /root/autodl-pub 下，COCO2017 就在其中，train2017.zip
+    # 和魔搭那份字节数完全一致（19336861798）。有它就直接读，省掉 19GB 下载——实测魔搭在高峰
+    # 期会掉到 0.6MB/s，那样要四个多小时。挂载点是只读的，解压时按文件名读取即可，不必拷贝。
+    # COCO_ZIP 可以手动覆盖，指向任意已有的 train2017.zip。
+    COCO_ZIP="${COCO_ZIP:-}"
+    if [ -z "$COCO_ZIP" ]; then
+        if [ -f data/train2017.zip ]; then
+            COCO_ZIP=data/train2017.zip
+        elif [ -f /root/autodl-pub/COCO2017/train2017.zip ]; then
+            COCO_ZIP=/root/autodl-pub/COCO2017/train2017.zip
+            echo "使用 AutoDL 公开数据集里的 COCO train2017.zip，跳过下载"
+        else
+            COCO_ZIP=data/train2017.zip
+        fi
+    fi
+    export COCO_ZIP  # 下面的 python 段通过 os.environ 读它
+
+    # 图片默认走魔搭：images.cocodataset.org 在 AutoDL 上实测只有 ~0.06MB/s，19GB 要下三个
+    # 月，等于不可用；魔搭的 PAI/COCO2017 是同一个 train2017.zip（19.34GB），快时 ~8.4MB/s，
+    # 约 40 分钟，但高峰期会掉到 0.6MB/s。dataset_snapshot_download 自带断点续传和 sha256
+    # 校验，不必再手搓 .part。
     # DATA_SOURCE=hf 时回退到官方源（境外网络下官方源更直接），那条路仍然先下 .part 再改名：
     # 直接下成最终文件名的话，断点残留的半个 zip 会让 `[ ! -f ... ]` 误判成已下好，跳过下载、
     # 到解压那步才报一个莫名其妙的错。
-    if [ ! -f data/train2017.zip ]; then
+    if [ ! -f "$COCO_ZIP" ]; then
         if [ "${DATA_SOURCE:-modelscope}" = "modelscope" ]; then
             echo "downloading COCO train2017 images (~19GB) from ModelScope ..."
             python - <<'PY'
@@ -306,7 +324,7 @@ print(f"kept {kept}/{total} conversations ({len(image_names)} unique images), ex
 
 os.makedirs("data/images", exist_ok=True)
 missing = 0
-with zipfile.ZipFile("data/train2017.zip") as zf:
+with zipfile.ZipFile(os.environ["COCO_ZIP"]) as zf:
     for name in image_names:
         dest = os.path.join("data/images", name)
         if os.path.exists(dest):
@@ -317,7 +335,7 @@ with zipfile.ZipFile("data/train2017.zip") as zf:
         except KeyError:
             missing += 1
 if missing:
-    print(f"warning: {missing} image(s) absent from train2017.zip; VQAInstructDataset will skip those samples")
+    print(f"warning: {missing} image(s) absent from the COCO zip; VQAInstructDataset will skip those samples")
 print("extraction done")
 PY
         echo "数据集就绪（mix665k 的 COCO 子集），annotations: data/llava_v1_5_mix665k_coco.json  images: data/images"
@@ -361,7 +379,7 @@ print(f"sampled {len(image_names)} unique images from {total} conversations, ext
 
 os.makedirs("data/images", exist_ok=True)
 missing = 0
-with zipfile.ZipFile("data/train2017.zip") as zf:
+with zipfile.ZipFile(os.environ["COCO_ZIP"]) as zf:
     for name in image_names:
         dest = os.path.join("data/images", name)
         if os.path.exists(dest):
@@ -372,13 +390,16 @@ with zipfile.ZipFile("data/train2017.zip") as zf:
         except KeyError:
             missing += 1
 if missing:
-    print(f"warning: {missing} image(s) absent from train2017.zip; VQAInstructDataset will skip those samples")
+    print(f"warning: {missing} image(s) absent from the COCO zip; VQAInstructDataset will skip those samples")
 print("subset extraction done")
 PY
         echo "数据集就绪（随机采样 $STAGE2_NUM_SAMPLES 条），annotations: data/llava_instruct_150k.json  images: data/images"
     fi
 
-    rm -f data/train2017.zip
+    # 只删自己下的那份；/root/autodl-pub 下的是只读公共数据集，不能碰。
+    if [ "$COCO_ZIP" = "data/train2017.zip" ]; then
+        rm -f data/train2017.zip
+    fi
 fi
 
 echo "最终磁盘占用："
