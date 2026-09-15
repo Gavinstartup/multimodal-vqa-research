@@ -3,7 +3,9 @@ import json
 import torch
 from PIL import Image
 
-from src.data import VQADataset, build_collate_fn
+import pytest
+
+from src.data import VQADataset, VQAInstructDataset, build_collate_fn
 
 
 class FakeTokenizer:
@@ -123,3 +125,91 @@ def test_collate_fn_attention_mask_survives_pad_token_aliasing_eos():
     assert out["input_ids"][1].tolist() == [1, 2, 2]  # padded with pad_token_id at the end
     assert out["labels"][1].tolist() == [-100, 2, -100]
     assert out["pixel_values"].shape == (2, 3, 8, 8)
+
+
+def _instruct_dataset(tmp_path, items, max_length=2048, num_image_tokens=4):
+    img_dir = _make_image(tmp_path, "d.jpg")
+    ann_path = _write_annotations(tmp_path, items)
+    return VQAInstructDataset(
+        image_dir=str(img_dir),
+        annotations_path=str(ann_path),
+        image_processor=FakeImageProcessor(),
+        tokenizer=FakeTokenizer(),
+        num_image_tokens=num_image_tokens,
+        image_token="<image>",
+        max_length=max_length,
+    )
+
+
+def test_instruct_multi_turn_supervises_every_assistant_span(tmp_path):
+    """Every ASSISTANT span contributes loss. An implementation that only read the first
+    pair (the way VQADataset does) would silently train on half of a 2-turn sample."""
+    dataset = _instruct_dataset(tmp_path, [{
+        "image": "d.jpg",
+        "conversations": [
+            {"from": "human", "value": "<image>\nwhat is this"},
+            {"from": "gpt", "value": "AAAA"},
+            {"from": "human", "value": "how many"},
+            {"from": "gpt", "value": "BBB"},
+        ],
+    }])
+
+    sample = dataset[0]
+    supervised = sample["input_ids"][sample["labels"] != -100].tolist()
+
+    a, b, eos = ord("A") % 50, ord("B") % 50, FakeTokenizer.eos_token_id
+    assert supervised == [a, a, a, a, eos, b, b, b, eos]
+
+
+def test_instruct_accepts_mix665k_shape_with_trailing_image_marker(tmp_path):
+    """llava_v1_5_mix665k puts <image> at either end of the first human turn and appends a
+    format instruction to short-answer items. Neither may leak into the supervised span,
+    and the marker must be replaced by the placeholder block rather than kept as text."""
+    dataset = _instruct_dataset(tmp_path, [{
+        "image": "d.jpg",
+        "conversations": [
+            {"from": "human", "value": "How many dogs?\nAnswer using a single word.\n<image>"},
+            {"from": "gpt", "value": "2"},
+        ],
+    }])
+
+    assert len(dataset) == 1
+    sample = dataset[0]
+    supervised = sample["input_ids"][sample["labels"] != -100].tolist()
+    assert supervised == [ord("2") % 50, FakeTokenizer.eos_token_id]
+
+    # 4 placeholder tokens + "USER: " + the question text + "\nASSISTANT: " + answer + eos.
+    # The literal "<image>" (7 chars) was consumed, not tokenized in place.
+    assert len(sample["input_ids"]) < len("How many dogs?Answer using a single word.") + 40
+
+
+def test_instruct_drops_whole_trailing_turns_instead_of_truncating(tmp_path):
+    """A tail-truncated turn contributes only -100 labels, and a batch made entirely of
+    those yields a NaN loss. The overflowing turn must disappear, not be cut mid-answer."""
+    dataset = _instruct_dataset(tmp_path, [{
+        "image": "d.jpg",
+        "conversations": [
+            {"from": "human", "value": "<image>\nq"},
+            {"from": "gpt", "value": "A" * 10},
+            {"from": "human", "value": "q2"},
+            {"from": "gpt", "value": "B" * 40},
+        ],
+    }], max_length=40)
+
+    sample = dataset[0]
+    supervised = sample["input_ids"][sample["labels"] != -100].tolist()
+
+    assert len(sample["input_ids"]) <= 40
+    assert ord("B") % 50 not in supervised
+    assert supervised.count(ord("A") % 50) == 10
+
+
+def test_instruct_rejects_max_length_that_cannot_fit_the_image_block(tmp_path):
+    with pytest.raises(ValueError, match="leaves no room"):
+        _instruct_dataset(tmp_path, [{
+            "image": "d.jpg",
+            "conversations": [
+                {"from": "human", "value": "<image>\nq"},
+                {"from": "gpt", "value": "a"},
+            ],
+        }], max_length=4, num_image_tokens=4)
