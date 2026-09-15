@@ -66,6 +66,9 @@ class PathSettings:
     # 得靠 scripts/prepare_autodl.sh 的 DOWNLOAD_STAGE2_DATA=1 另外下 COCO train2017。
     DATA_DIR = Path("data")
     IMAGE_DIR = DATA_DIR / "images"
-    ANNOTATIONS_JSON = DATA_DIR / "llava_v1_5_mix665k_coco.json"
+    # scripts/make_shortqa_eval.py 的产物：从 llava_v1_5_mix665k_coco.json 里剔除了
+    # EVAL_SHORTQA_JSON 那 2000 条短答案题，评的才是泛化而不是记忆。
+    ANNOTATIONS_JSON = DATA_DIR / "mix665k_coco_train.json"
+    EVAL_SHORTQA_JSON = DATA_DIR / "eval_shortqa.json"
     STAGE1_CHECKPOINT = Path("outputs") / "stage1_projector" / "final_model"
     OUTPUT_DIR = Path("outputs") / "stage2_instruct"
