@@ -178,14 +178,26 @@ def test_instruct_accepts_mix665k_shape_with_trailing_image_marker(tmp_path):
     supervised = sample["input_ids"][sample["labels"] != -100].tolist()
     assert supervised == [ord("2") % 50, FakeTokenizer.eos_token_id]
 
-    # 4 placeholder tokens + "USER: " + the question text + "\nASSISTANT: " + answer + eos.
-    # The literal "<image>" (7 chars) was consumed, not tokenized in place.
-    assert len(sample["input_ids"]) < len("How many dogs?Answer using a single word.") + 40
+    # Marker position must not change the encoding at all: the placeholder block is always
+    # emitted first and the literal marker is stripped wherever it sat.
+    leading = _instruct_dataset(tmp_path, [{
+        "image": "d.jpg",
+        "conversations": [
+            {"from": "human", "value": "<image>\nHow many dogs?\nAnswer using a single word."},
+            {"from": "gpt", "value": "2"},
+        ],
+    }])[0]
+    assert sample["input_ids"].tolist() == leading["input_ids"].tolist()
+    assert sample["labels"].tolist() == leading["labels"].tolist()
 
 
 def test_instruct_drops_whole_trailing_turns_instead_of_truncating(tmp_path):
     """A tail-truncated turn contributes only -100 labels, and a batch made entirely of
     those yields a NaN loss. The overflowing turn must disappear, not be cut mid-answer."""
+    # FakeTokenizer is char-wise, so one image token costs len("<image>") == 7 "tokens".
+    # max_length is picked so turn 1 (38) fits and turn 1 + turn 2 (38 + 61) does not —
+    # otherwise the first turn overflows on its own and we would be exercising the
+    # question-trimming branch instead of the turn-dropping one.
     dataset = _instruct_dataset(tmp_path, [{
         "image": "d.jpg",
         "conversations": [
@@ -194,12 +206,12 @@ def test_instruct_drops_whole_trailing_turns_instead_of_truncating(tmp_path):
             {"from": "human", "value": "q2"},
             {"from": "gpt", "value": "B" * 40},
         ],
-    }], max_length=40)
+    }], max_length=50, num_image_tokens=1)
 
     sample = dataset[0]
     supervised = sample["input_ids"][sample["labels"] != -100].tolist()
 
-    assert len(sample["input_ids"]) <= 40
+    assert len(sample["input_ids"]) <= 50
     assert ord("B") % 50 not in supervised
     assert supervised.count(ord("A") % 50) == 10
 
